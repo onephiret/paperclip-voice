@@ -1,5 +1,6 @@
 const twilio = require('twilio');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { TOOL_DECLARATIONS, runWithTools } = require('../lib/paperclip');
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -7,12 +8,11 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const SYSTEM_PROMPT = `You are Paperclip, an AI assistant helping Dan while he drives.
 Be concise — responses should be 1-3 sentences max since they'll be spoken aloud.
 Be direct, helpful, and conversational. No bullet points or markdown.
-Focus on actionable answers. If asked about tasks or work, be specific and brief.`;
+You have tools to manage Dan's tasks in Paperclip. When asked about agenda, tasks, or work — use them.
+When creating or updating tasks, confirm what you did in one brief sentence.`;
 
-// Simple in-memory conversation history (per-call via CallSid)
 const conversations = new Map();
-
-const MAX_HISTORY = 10; // keep last N turns
+const MAX_HISTORY = 10;
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
@@ -38,7 +38,6 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // Maintain conversation history per call
     if (!conversations.has(callSid)) {
       conversations.set(callSid, []);
     }
@@ -47,6 +46,7 @@ module.exports = async (req, res) => {
     const model = genAI.getGenerativeModel({
       model: 'gemini-2.5-flash',
       systemInstruction: SYSTEM_PROMPT,
+      tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
     });
 
     const chat = model.startChat({
@@ -56,14 +56,11 @@ module.exports = async (req, res) => {
       })),
     });
 
-    const result = await chat.sendMessage(speech);
-    const aiResponse = result.response.text().trim();
+    const aiResponse = await runWithTools(chat, speech);
 
-    // Store turn in history
     history.push({ role: 'user', text: speech });
     history.push({ role: 'model', text: aiResponse });
 
-    // Clean up old calls after 30 min (rough estimate by size limit)
     if (conversations.size > 100) {
       const firstKey = conversations.keys().next().value;
       conversations.delete(firstKey);
@@ -78,7 +75,6 @@ module.exports = async (req, res) => {
     });
     gather.say({ voice: 'Polly.Joanna', language: 'en-US' }, aiResponse);
 
-    // Fallback if silence after response
     twiml.say({ voice: 'Polly.Joanna' }, 'Anything else?');
     twiml.redirect('/api/voice/respond');
   } catch (err) {

@@ -4,14 +4,17 @@
 //   curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<your-domain>/api/telegram"
 //
 // Required env vars: TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, GEMINI_API_KEY
-// Flow: voice msg → Whisper STT → Gemini → OpenAI TTS → voice reply
+//                    PAPERCLIP_VOICE_API_KEY, PAPERCLIP_API_URL, PAPERCLIP_COMPANY_ID
+// Flow: voice msg → Whisper STT → Gemini (with Paperclip tools) → OpenAI TTS → voice reply
 
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { TOOL_DECLARATIONS, runWithTools } = require('./lib/paperclip');
 
-const SYSTEM_PROMPT = `You are Paperclip, an AI assistant helping Dan manage work and tasks.
+const SYSTEM_PROMPT = `You are Paperclip, Dan's AI assistant for managing work and tasks.
 Be concise — responses should be 1-3 sentences max since they'll be spoken aloud.
 Be direct, helpful, and conversational. No bullet points or markdown.
-Focus on actionable answers. If asked about tasks or work, be specific and brief.`;
+You have tools to manage Dan's tasks in Paperclip. When asked about agenda, tasks, or work — use them.
+When creating or updating tasks, confirm what you did in one brief sentence.`;
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const conversations = new Map();
@@ -63,18 +66,22 @@ async function generateResponse(chatId, userMessage) {
     conversations.set(chatId, []);
   }
   const history = conversations.get(chatId);
+
   const model = genAI.getGenerativeModel({
     model: 'gemini-2.5-flash',
     systemInstruction: SYSTEM_PROMPT,
+    tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
   });
+
   const chat = model.startChat({
     history: history.slice(-(MAX_HISTORY * 2)).map((turn) => ({
       role: turn.role,
       parts: [{ text: turn.text }],
     })),
   });
-  const result = await chat.sendMessage(userMessage);
-  const responseText = result.response.text().trim();
+
+  const responseText = await runWithTools(chat, userMessage);
+
   history.push({ role: 'user', text: userMessage });
   history.push({ role: 'model', text: responseText });
   return responseText;
@@ -125,7 +132,7 @@ module.exports = async (req, res) => {
   if (message.text === '/start') {
     await telegramApi('sendMessage', {
       chat_id: chatId,
-      text: "Hey! I'm Paperclip. Send me a voice message and I'll respond in kind.",
+      text: "Hey! I'm Paperclip. Send me a voice message and I'll respond in kind. I can check your tasks, create new ones, or update existing ones.",
     });
     return res.status(200).json({ ok: true });
   }
